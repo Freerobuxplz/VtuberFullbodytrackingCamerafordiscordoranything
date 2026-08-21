@@ -1,0 +1,571 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Mocap Studio</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script src="https://unpkg.com/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #111; font-family: 'Inter', sans-serif; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 1; }
+        
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        /* Loading spinner CSS */
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-top: 3px solid #3b82f6;
+            border-radius: 50%;
+            width: 24px;
+            height: 24px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="text-white">
+
+    <!-- 3D Canvas -->
+    <div id="canvas-container"></div>
+
+    <!-- UI Overlay -->
+    <div class="absolute inset-0 pointer-events-none z-10 flex flex-col justify-between p-6">
+        
+        <!-- Show UI Button (Hidden by default) -->
+        <button id="btnShowUi" class="hidden absolute top-6 left-6 pointer-events-auto bg-blue-600 hover:bg-blue-700 text-white py-2 px-4 rounded-lg font-medium shadow-lg z-20">
+            Show UI
+        </button>
+
+        <!-- Top Bar -->
+        <div class="flex justify-between items-start">
+            <div id="mainControls" class="glass-panel p-4 rounded-xl pointer-events-auto w-80 max-h-[80vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-2">
+                    <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-500 bg-clip-text text-transparent">Live Mocap</h1>
+                    <button id="btnHideUi" class="text-gray-400 hover:text-white text-xs bg-white/10 px-2 py-1 rounded">Hide UI</button>
+                </div>
+                <p class="text-xs text-gray-300 mb-4">Upload a rigged .glb model. Stand back so full body is visible.</p>
+                
+                <label class="relative cursor-pointer bg-blue-600 hover:bg-blue-700 transition-colors py-2 px-4 rounded-lg font-medium shadow-lg inline-block w-full text-center mb-4">
+                    <span class="text-sm">Upload .GLB File</span>
+                    <input type="file" id="glb-upload" accept=".glb,.gltf" class="hidden" />
+                </label>
+
+                <!-- Environment Controls -->
+                <div class="mb-4">
+                    <label class="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Environment</label>
+                    <select id="bgSelect" class="w-full bg-slate-800 text-white text-sm rounded-lg border border-slate-600 p-2 outline-none focus:border-blue-500">
+                        <option value="default">Default Studio</option>
+                        <option value="sonic">Sonic City (Synthwave)</option>
+                    </select>
+                </div>
+
+                <!-- Head Rotation Controls -->
+                <div>
+                    <label class="block text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-2">Manual Head Rotation Offset</label>
+                    
+                    <div class="mb-2">
+                        <div class="flex justify-between text-xs mb-1"><span>Pitch (X)</span><span id="headRotXVal">0°</span></div>
+                        <input type="range" id="headRotX" min="-90" max="90" value="0" class="w-full accent-blue-500">
+                    </div>
+                    
+                    <div class="mb-2">
+                        <div class="flex justify-between text-xs mb-1"><span>Yaw (Y)</span><span id="headRotYVal">0°</span></div>
+                        <input type="range" id="headRotY" min="-90" max="90" value="0" class="w-full accent-blue-500">
+                    </div>
+                    
+                    <div class="mb-2">
+                        <div class="flex justify-between text-xs mb-1"><span>Roll (Z)</span><span id="headRotZVal">0°</span></div>
+                        <input type="range" id="headRotZ" min="-90" max="90" value="0" class="w-full accent-blue-500">
+                    </div>
+                </div>
+            </div>
+
+            <!-- Status Indicators -->
+            <div id="statusPanel" class="glass-panel p-3 rounded-xl pointer-events-auto flex flex-col gap-2">
+                <div class="flex items-center gap-2">
+                    <div id="status-camera" class="w-3 h-3 rounded-full bg-red-500"></div>
+                    <span class="text-sm">Camera Status</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div id="status-model" class="w-3 h-3 rounded-full bg-red-500"></div>
+                    <span class="text-sm">Model Status</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Bottom Area: Webcam PiP -->
+        <div class="self-end pointer-events-auto relative flex flex-col items-end gap-2">
+            <button id="btnToggleCam" class="bg-slate-800 hover:bg-slate-700 text-xs text-white py-1 px-3 rounded-lg border border-slate-600 transition-colors shadow-lg">
+                Hide Camera Feed
+            </button>
+            <div id="camContainer" class="glass-panel p-2 rounded-xl shadow-2xl relative overflow-hidden group">
+                <div id="loading-cam" class="absolute inset-0 flex flex-col items-center justify-center bg-slate-900 z-10">
+                    <div class="spinner mb-2"></div>
+                    <span class="text-xs text-gray-400">Starting Camera...</span>
+                </div>
+                <!-- Hidden video element for mediapipe feed -->
+                <video id="input-video" class="hidden" autoplay playsinline></video>
+                <!-- Canvas to draw skeleton over video -->
+                <canvas id="output-canvas" class="rounded-lg w-64 md:w-80 h-auto transform scale-x-[-1]"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // DOM Elements
+        const fileInput = document.getElementById('glb-upload');
+        const videoElement = document.getElementById('input-video');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusCamera = document.getElementById('status-camera');
+        const statusModel = document.getElementById('status-model');
+        const loadingCam = document.getElementById('loading-cam');
+
+        // New DOM Elements
+        const mainControls = document.getElementById('mainControls');
+        const statusPanel = document.getElementById('statusPanel');
+        const camContainer = document.getElementById('camContainer');
+        const btnHideUi = document.getElementById('btnHideUi');
+        const btnShowUi = document.getElementById('btnShowUi');
+        const btnToggleCam = document.getElementById('btnToggleCam');
+        const bgSelect = document.getElementById('bgSelect');
+        const headRotX = document.getElementById('headRotX');
+        const headRotY = document.getElementById('headRotY');
+        const headRotZ = document.getElementById('headRotZ');
+        const headRotXVal = document.getElementById('headRotXVal');
+        const headRotYVal = document.getElementById('headRotYVal');
+        const headRotZVal = document.getElementById('headRotZVal');
+
+        // Three.js Globals
+        let scene, camera, renderer, orbitControls;
+        let activeModel = null;
+        let modelInitialPos = null;
+        let activeBones = {}; 
+        let skeletonHelper = null;
+        let cityTexture = null;
+
+        const POSE_CONNECTIONS = [
+            [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8], [9, 10], [11, 12], [11, 13], [13, 15],
+            [15, 17], [15, 19], [15, 21], [17, 19], [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
+            [11, 23], [12, 24], [23, 24], [23, 25], [24, 26], [25, 27], [26, 28], [27, 29], [28, 30], [29, 31],
+            [30, 32], [27, 31], [28, 32]
+        ];
+
+        const BONE_MAPPING = [
+            { name: 'Hips', aliases: ['hips', 'pelvis'], mp1: [23, 24], mp2: [11, 12] },
+            { name: 'Spine', aliases: ['spine', 'spine1', 'spine2'], mp1: [23, 24], mp2: [11, 12] },
+            { name: 'Neck', aliases: ['neck'], mp1: [11, 12], mp2: [0] },
+            { name: 'Head', aliases: ['head'], mp1: [11, 12], mp2: [0] },
+            { name: 'LeftArm', aliases: ['leftarm', 'l_arm'], mp1: [11], mp2: [13] },
+            { name: 'LeftForeArm', aliases: ['leftforearm', 'l_forearm'], mp1: [13], mp2: [15] },
+            { name: 'LeftHand', aliases: ['lefthand', 'l_hand'], mp1: [15], mp2: [17, 19, 21] },
+            { name: 'RightArm', aliases: ['rightarm', 'r_arm'], mp1: [12], mp2: [14] },
+            { name: 'RightForeArm', aliases: ['rightforearm', 'r_forearm'], mp1: [14], mp2: [16] },
+            { name: 'RightHand', aliases: ['righthand', 'r_hand'], mp1: [16], mp2: [18, 20, 22] },
+            { name: 'LeftUpLeg', aliases: ['leftupleg', 'l_upleg', 'leftleg'], mp1: [23], mp2: [25] },
+            { name: 'LeftLeg', aliases: ['leftleg', 'l_leg'], mp1: [25], mp2: [27] },
+            { name: 'LeftFoot', aliases: ['leftfoot', 'l_foot'], mp1: [27], mp2: [31] },
+            { name: 'RightUpLeg', aliases: ['rightupleg', 'r_upleg', 'rightleg'], mp1: [24], mp2: [26] },
+            { name: 'RightLeg', aliases: ['rightleg', 'r_leg'], mp1: [26], mp2: [28] },
+            { name: 'RightFoot', aliases: ['rightfoot', 'r_foot'], mp1: [28], mp2: [32] }
+        ];
+
+        function initThreeJS() {
+            const container = document.getElementById('canvas-container');
+            
+            // Scene Setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x1a1a2e);
+            scene.fog = new THREE.Fog(0x1a1a2e, 10, 50);
+
+            // Camera Setup
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.5, 5);
+
+            // Renderer Setup
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            renderer.shadowMap.enabled = true;
+            container.appendChild(renderer.domElement);
+
+            // Lighting
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+            hemiLight.position.set(0, 20, 0);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(-3, 10, -10);
+            dirLight.castShadow = true;
+            scene.add(dirLight);
+
+            const gridHelper = new THREE.GridHelper(10, 20, 0x3b82f6, 0x475569);
+            scene.add(gridHelper);
+
+            // Orbit Controls
+            orbitControls = new THREE.OrbitControls(camera, renderer.domElement);
+            orbitControls.enableDamping = true;
+            orbitControls.dampingFactor = 0.05;
+            orbitControls.target.set(0, 1, 0);
+
+            window.addEventListener('resize', onWindowResize);
+            animate();
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const url = URL.createObjectURL(file);
+            const loader = new THREE.GLTFLoader();
+
+            // Indicate loading
+            statusModel.classList.remove('bg-red-500', 'bg-green-500');
+            statusModel.classList.add('bg-yellow-500');
+
+            loader.load(url, (gltf) => {
+                if (activeModel) {
+                    scene.remove(activeModel);
+                }
+
+                activeModel = gltf.scene;
+                
+                // Pre-process model (Shadows, Orientation)
+                activeModel.traverse((child) => {
+                    if (child.isMesh) {
+                        child.castShadow = true;
+                        child.receiveShadow = true;
+                    }
+                });
+
+                // Auto-scale and center
+                const box = new THREE.Box3().setFromObject(activeModel);
+                const center = box.getCenter(new THREE.Vector3());
+                const size = box.getSize(new THREE.Vector3());
+                const maxDim = Math.max(size.x, size.y, size.z);
+                const scale = 2.5 / maxDim; // Normalize height to ~2.5 units
+                
+                activeModel.scale.set(scale, scale, scale);
+                // Center the feet at Y=0
+                activeModel.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
+                modelInitialPos = activeModel.position.clone();
+                
+                scene.add(activeModel);
+
+                // Map bones
+                mapBones(activeModel);
+
+                statusModel.classList.remove('bg-yellow-500');
+                statusModel.classList.add('bg-green-500');
+                
+            }, undefined, (error) => {
+                console.error(error);
+                statusModel.classList.add('bg-red-500');
+                alert("Error loading model. Make sure it is a valid .glb or .gltf file.");
+            });
+        }
+
+        function mapBones(model) {
+            activeBones = {};
+            let skeletonFound = false;
+
+            // Search for SkinnedMesh and bones
+            model.traverse((child) => {
+                if (child.isBone) {
+                    skeletonFound = true;
+                }
+            });
+
+            if (!skeletonFound) {
+                alert("No rig/skeleton found in this model! Animations will not work.");
+                return;
+            }
+
+            // Create dictionary for fast access by aliases
+            const sceneBones = [];
+            model.traverse((child) => {
+                if (child.isBone) sceneBones.push(child);
+            });
+
+            BONE_MAPPING.forEach(mapping => {
+                // Find matching bone in scene
+                let foundBone = null;
+                for (let b of sceneBones) {
+                    if (mapping.aliases.some(alias => b.name.toLowerCase().includes(alias.toLowerCase()))) {
+                        foundBone = b;
+                        break;
+                    }
+                }
+
+                if (foundBone) {
+                    // Try to find a child bone to establish initial direction
+                    let childBone = null;
+                    if (foundBone.children.length > 0) {
+                        // Prefer bone children
+                        childBone = foundBone.children.find(c => c.isBone) || foundBone.children[0];
+                    }
+
+                    if (childBone) {
+                        // Calculate initial world state for math later
+                        foundBone.updateMatrixWorld(true);
+                        childBone.updateMatrixWorld(true);
+
+                        const initialWorldQuat = new THREE.Quaternion();
+                        foundBone.getWorldQuaternion(initialWorldQuat);
+
+                        const bonePos = new THREE.Vector3();
+                        foundBone.getWorldPosition(bonePos);
+                        
+                        const childPos = new THREE.Vector3();
+                        childBone.getWorldPosition(childPos);
+
+                        const initialDir = new THREE.Vector3().subVectors(childPos, bonePos).normalize();
+
+                        activeBones[mapping.name] = {
+                            bone: foundBone,
+                            initialWorldQuat: initialWorldQuat,
+                            initialDir: initialDir,
+                            targetWorldQuat: initialWorldQuat.clone() // Default to rest
+                        };
+                        console.log(`Mapped ${mapping.name} -> ${foundBone.name}`);
+                    }
+                }
+            });
+        }
+
+        function getAveragePoint(landmarks, indices) {
+            let x = 0, y = 0, z = 0;
+            for (let i of indices) {
+                x += landmarks[i].x;
+                y += landmarks[i].y;
+                z += landmarks[i].z;
+            }
+            const count = indices.length;
+            // Map MediaPipe coordinates to Three.js coordinates
+            // Fixed inversion: X is kept positive to prevent left/right twisting, Y and Z inverted to match ThreeJS.
+            return new THREE.Vector3(x / count, -y / count, -z / count); 
+        }
+
+        function onResults(results) {
+            // Hide loading overlay once we get first results
+            if (loadingCam.style.display !== 'none') {
+                loadingCam.style.display = 'none';
+                statusCamera.classList.remove('bg-red-500', 'bg-yellow-500');
+                statusCamera.classList.add('bg-green-500');
+                
+                // Adjust canvas to match video aspect ratio
+                canvasElement.width = videoElement.videoWidth;
+                canvasElement.height = videoElement.videoHeight;
+            }
+
+            // Draw to Picture-in-Picture canvas
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+            
+            if (results.poseLandmarks) {
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, { color: '#00FF00', lineWidth: 4 });
+                drawLandmarks(canvasCtx, results.poseLandmarks, { color: '#FF0000', lineWidth: 2, radius: 2 });
+            }
+            canvasCtx.restore();
+
+            // Apply Root Translation
+            if (results.poseLandmarks && activeModel && modelInitialPos) {
+                // Calculate average hip position in normalized screen space
+                const hipsX = (results.poseLandmarks[23].x + results.poseLandmarks[24].x) / 2;
+                const hipsY = (results.poseLandmarks[23].y + results.poseLandmarks[24].y) / 2;
+                const hipsZ = (results.poseLandmarks[23].z + results.poseLandmarks[24].z) / 2;
+
+                // Move model root position relative to its initial centered position
+                activeModel.position.x = modelInitialPos.x + ((0.5 - hipsX) * 4.0);
+                activeModel.position.y = modelInitialPos.y + ((0.5 - hipsY) * 3.0);
+                activeModel.position.z = modelInitialPos.z + (-hipsZ * 4.0);
+            }
+
+            // Apply 3D Tracking logic
+            if (results.poseWorldLandmarks && activeModel) {
+                BONE_MAPPING.forEach(mapping => {
+                    const boneData = activeBones[mapping.name];
+                    if (!boneData) return;
+
+                    const p1 = getAveragePoint(results.poseWorldLandmarks, mapping.mp1);
+                    const p2 = getAveragePoint(results.poseWorldLandmarks, mapping.mp2);
+
+                    const targetDir = new THREE.Vector3().subVectors(p2, p1).normalize();
+                    if (targetDir.lengthSq() === 0) return;
+
+                    // Calculate the rotation needed to go from the bone's initial resting direction to the new tracking direction
+                    const deltaQ = new THREE.Quaternion().setFromUnitVectors(boneData.initialDir, targetDir);
+                    
+                    // Apply this delta to the bone's initial world rotation
+                    const targetWorldQuat = deltaQ.multiply(boneData.initialWorldQuat);
+                    
+                    // Save for the animation loop to SLERP towards
+                    boneData.targetWorldQuat = targetWorldQuat;
+                });
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            if (orbitControls) orbitControls.update();
+
+            // Apply IK/Rotations
+            if (activeModel) {
+                // Must iterate through BONE_MAPPING in order (Spine -> Extremities) to maintain valid parent matrices
+                for (let mapping of BONE_MAPPING) {
+                    const boneData = activeBones[mapping.name];
+                    if (!boneData || !boneData.targetWorldQuat) continue;
+
+                    // To set a bone's local rotation based on a target world rotation, 
+                    // we must factor in its parent's current world rotation.
+                    if (boneData.bone.parent) {
+                        // Ensure parent's world matrix is completely up to date before calculating inverse
+                        boneData.bone.parent.updateMatrixWorld(true);
+                        
+                        const parentWorldQuat = new THREE.Quaternion();
+                        boneData.bone.parent.getWorldQuaternion(parentWorldQuat);
+                        
+                        // localQuat = parentWorldQuat^-1 * targetWorldQuat
+                        const targetLocalQuat = parentWorldQuat.invert().multiply(boneData.targetWorldQuat);
+                        
+                        // Apply Manual Head Rotation Offset
+                        if (mapping.name === 'Head') {
+                            const offsetEuler = new THREE.Euler(
+                                THREE.MathUtils.degToRad(parseFloat(headRotX.value)),
+                                THREE.MathUtils.degToRad(parseFloat(headRotY.value)),
+                                THREE.MathUtils.degToRad(parseFloat(headRotZ.value)),
+                                'XYZ'
+                            );
+                            const offsetQuat = new THREE.Quaternion().setFromEuler(offsetEuler);
+                            targetLocalQuat.multiply(offsetQuat);
+                        }
+
+                        // Rig tweening off: immediate snap to target local quaternion
+                        boneData.bone.quaternion.copy(targetLocalQuat); 
+                    } else {
+                        // Apply Manual Head Rotation Offset (Fallback)
+                        let targetQuat = boneData.targetWorldQuat.clone();
+                        if (mapping.name === 'Head') {
+                            const offsetEuler = new THREE.Euler(
+                                THREE.MathUtils.degToRad(parseFloat(headRotX.value)),
+                                THREE.MathUtils.degToRad(parseFloat(headRotY.value)),
+                                THREE.MathUtils.degToRad(parseFloat(headRotZ.value)),
+                                'XYZ'
+                            );
+                            const offsetQuat = new THREE.Quaternion().setFromEuler(offsetEuler);
+                            targetQuat.multiply(offsetQuat);
+                        }
+                        boneData.bone.quaternion.copy(targetQuat);
+                    }
+                }
+            }
+
+            if (renderer && scene && camera) {
+                renderer.render(scene, camera);
+            }
+        }
+
+        // Initialize Everything
+        window.onload = async () => {
+            initThreeJS();
+            
+            // Event Listeners
+            fileInput.addEventListener('change', handleFileUpload);
+
+            // UI Toggle Listeners
+            btnHideUi.addEventListener('click', () => {
+                mainControls.classList.add('hidden');
+                statusPanel.classList.add('hidden');
+                btnShowUi.classList.remove('hidden');
+            });
+            btnShowUi.addEventListener('click', () => {
+                mainControls.classList.remove('hidden');
+                statusPanel.classList.remove('hidden');
+                btnShowUi.classList.add('hidden');
+            });
+            btnToggleCam.addEventListener('click', () => {
+                camContainer.classList.toggle('hidden');
+                btnToggleCam.textContent = camContainer.classList.contains('hidden') ? 'Show Camera Feed' : 'Hide Camera Feed';
+            });
+
+            // Background Select Listener
+            bgSelect.addEventListener('change', (e) => {
+                if (e.target.value === 'sonic') {
+                    if (!cityTexture) {
+                        // Load a neon/synthwave aesthetic city background
+                        cityTexture = new THREE.TextureLoader().load('https://images.unsplash.com/photo-1555680202-c86f0e12f086?q=80&w=2070&auto=format&fit=crop');
+                        cityTexture.mapping = THREE.EquirectangularReflectionMapping;
+                        cityTexture.encoding = THREE.sRGBEncoding;
+                    }
+                    scene.background = cityTexture;
+                    scene.fog.color.setHex(0x000000); // Darken fog for neon city vibe
+                } else {
+                    scene.background = new THREE.Color(0x1a1a2e);
+                    scene.fog.color.setHex(0x1a1a2e);
+                }
+            });
+
+            // Head Rotation Listeners
+            const updateRotVal = (el, valEl) => { valEl.textContent = el.value + '°'; };
+            headRotX.addEventListener('input', () => updateRotVal(headRotX, headRotXVal));
+            headRotY.addEventListener('input', () => updateRotVal(headRotY, headRotYVal));
+            headRotZ.addEventListener('input', () => updateRotVal(headRotZ, headRotZVal));
+
+            // Initialize MediaPipe Pose
+            const pose = new Pose({locateFile: (file) => {
+                return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+            }});
+            
+            pose.setOptions({
+                modelComplexity: 1, // 0, 1, or 2 (1 is good balance for realtime)
+                smoothLandmarks: true,
+                enableSegmentation: false,
+                smoothSegmentation: false,
+                minDetectionConfidence: 0.5,
+                minTrackingConfidence: 0.5
+            });
+            pose.onResults(onResults);
+
+            statusCamera.classList.replace('bg-red-500', 'bg-yellow-500');
+
+            // Setup Camera WebAPI
+            const cameraUtils = new Camera(videoElement, {
+                onFrame: async () => {
+                    await pose.send({image: videoElement});
+                },
+                width: 640,
+                height: 480
+            });
+            
+            cameraUtils.start().catch(err => {
+                console.error("Camera error:", err);
+                statusCamera.classList.replace('bg-yellow-500', 'bg-red-500');
+                loadingCam.innerHTML = `<span class='text-xs text-red-400 p-4 text-center'>Camera access denied or unavailable.</span>`;
+            });
+        };
+    </script>
+</body>
+</html>
